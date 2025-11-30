@@ -42,7 +42,11 @@ class ProductTemplate(models.Model):
     @api.model
     def _search_build_domain(self, domain_list, search, fields, extra=None):
         if search:
-            index = self.env["meilisearch.index"].get_matching_index(model=self._name)
+            index = (
+                self.env["meilisearch.index"]
+                .sudo()
+                .get_matching_index(model=self._name)
+            )
             client = index.get_client() if index else None
             if client:
                 try:
