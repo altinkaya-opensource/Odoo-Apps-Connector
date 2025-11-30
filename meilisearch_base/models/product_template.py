@@ -53,7 +53,7 @@ class ProductTemplate(models.Model):
                     meili_res = client.index(index.index_name).search(
                         search,
                         {
-                            "limit": 5,
+                            "limit": self.env.context.get("search_limit", 25),
                             "hybrid": {"embedder": "default", "semanticRatio": 0.3},
                         },
                     )
