@@ -29,6 +29,7 @@ class ProductTemplate(models.Model):
         document["feature_names"] = self.feature_line_ids.mapped(
             "value_ids.display_name"
         )
+        document["search_keywords"] = self.search_keywords or ""
 
         return document
 
