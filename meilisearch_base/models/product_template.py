@@ -36,7 +36,17 @@ class ProductTemplate(models.Model):
     def _get_index_document_filter(self):
         return lambda r: r.is_published and r.sale_ok and r.categ_id.is_published
 
-    @api.depends("name")
+    @api.depends(
+        "name",
+        "search_keywords",
+        "categ_id",
+        "variant_sale_qty360days",
+        "attribute_line_ids",
+        "feature_line_ids",
+        "default_code",
+        "description_sale",
+        "public_description",
+    )
     def _compute_index_document(self):
         return super()._compute_index_document()
 
