@@ -1,9 +1,4 @@
-import logging
-
 from odoo import api, models
-from odoo.osv import expression
-
-_logger = logging.getLogger(__name__)
 
 
 class ProductTemplate(models.Model):
@@ -50,30 +45,3 @@ class ProductTemplate(models.Model):
     def _compute_index_document(self):
         return super()._compute_index_document()
 
-    @api.model
-    def _search_build_domain(self, domain_list, search, fields, extra=None):
-        if search:
-            index = (
-                self.env["meilisearch.index"]
-                .sudo()
-                .get_matching_index(model=self._name)
-            )
-            client = index.get_client() if index else None
-            if client:
-                try:
-                    meili_res = client.index(index.index_name).search(
-                        search,
-                        {
-                            "limit": self.env.context.get("search_limit", 25),
-                            "hybrid": {"embedder": "default", "semanticRatio": 0.3},
-                        },
-                    )
-                    hits = meili_res.get("hits", [])
-                    ids = [int(hit["id"]) for hit in hits if hit.get("id")]
-                    if ids:
-                        return [("id", "in", ids)]
-                except Exception:
-                    _logger.exception(
-                        "Meilisearch search failed for query '%s'", search
-                    )
-        return super()._search_build_domain(domain_list, search, fields, extra=extra)
