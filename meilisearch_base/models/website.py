@@ -33,15 +33,22 @@ class WebsiteSearchableMixin(models.AbstractModel):
             client = index.get_client() if index else None
             if client:
                 try:
+                    # Get current language for filtering
+                    current_lang = self.env.context.get("lang", "en_US")
+
                     meili_res = client.index(index.index_name).search(
                         search,
                         {
                             "limit": self.env.context.get("search_limit") or 25,
-                            "hybrid": {"embedder": "default", "semanticRatio": 0.3},
+                            "filter": f'lang = "{current_lang}"',
+                            "hybrid": {"embedder": "default", "semanticRatio": 0.5},
                         },
                     )
                     hits = meili_res.get("hits", [])
-                    ids = [int(hit["id"]) for hit in hits if hit.get("id")]
+                    # Use source_id instead of id (which now contains lang suffix)
+                    ids = [
+                        int(hit["source_id"]) for hit in hits if hit.get("source_id")
+                    ]
                     if len(ids) > 0:
                         return ids
                 except Exception as exc:

@@ -1,9 +1,6 @@
-import datetime
 import json
 import logging
 from hashlib import sha256
-
-import pytz
 
 from odoo import api, fields, models
 
@@ -15,84 +12,170 @@ class MeilsearchDocumentMixin(models.AbstractModel):
     _description = "Meilisearch Document Mixin"
 
     name = fields.Char()
-    index_date = fields.Datetime()
-    index_document = fields.Json(
-        compute="_compute_index_document",
-        store=True,
-        help="Stores the document as JSONB.",
+
+    # Link to index documents for all languages
+    meilisearch_document_ids = fields.One2many(
+        "meilisearch.index.document",
+        "res_id",
+        string="Meilisearch Documents",
+        domain=lambda self: [("res_model", "=", self._name)],
     )
-    index_document_hash = fields.Text(compute="_compute_index_document", store=True)
-    index_document_read = fields.Text(compute="_compute_index_document_read", help="Returns the document as JSON.")
-    index_result = fields.Selection(
+
+    # Computed summary field for convenience
+    meilisearch_status = fields.Selection(
         [
-            ("queued", "Queued"),
-            ("indexed", "Indexed"),
-            ("error", "Error"),
-            ("not_found", "Not Found"),
-            ("no_index", "No Index"),
-        ]
+            ("not_configured", "Not Configured"),
+            ("pending", "Pending"),
+            ("partial", "Partially Indexed"),
+            ("indexed", "Fully Indexed"),
+            ("error", "Has Errors"),
+        ],
+        string="Meilisearch Status",
+        compute="_compute_meilisearch_status",
+        store=True,
     )
-    index_response = fields.Text(help="Response from Meilisearch index.")
 
     # Compute methods
 
     @api.depends("name")
     def _compute_index_document(self):
-        index = self.env["meilisearch.index"].get_matching_index(model=self[:0]._name)
+        """
+        Main compute method - creates/updates index.document records
+        for all configured languages.
+        """
+        index = self.env["meilisearch.index"].get_matching_index(model=self[:1]._name)
+        if not index:
+            return
 
-        # Filter all records that should be indexed
-        index_records = self.filtered(self._get_index_document_filter())
+        # Filter records that should be indexed
+        filter_func = self._get_index_document_filter()
+        index_records = self.filtered(filter_func)
+        delete_records = self - index_records
 
-        # Update Meilisearch document if hash has changed
-        update_records = index_records
-        for record in index_records:
-            document = record._prepare_index_document()
-            document_hash = sha256(json.dumps(document).encode()).hexdigest()
-            if (document_hash != record.index_document_hash) or record.index_result != "indexed":
-                record.index_document = document
-                record.index_document_hash = document_hash
-            else:
-                update_records = update_records - record
+        # Process indexable records
+        if index_records:
+            index._ensure_index_documents(index_records)
+            self._sync_index_documents(index, index_records)
 
-        # Update
-        if index:
-            update_records._update_documents(index)
-
-        # Get documents that are indexed and no longer match the filter
-        delete_records = self.filtered(lambda d: d.index_result == "indexed") - index_records
-
-        # Delete these documents from index
+        # Handle records that should be deleted
         if delete_records:
-            delete_records._delete_documents()
+            self._cleanup_index_documents(index, delete_records)
 
-    def _compute_index_document_read(self):
+    def _sync_index_documents(self, index, records):
+        """
+        Update the index.document records for the given source records.
+        Prepares documents in each language context and syncs to Meilisearch.
+        """
+        IndexDocument = self.env["meilisearch.index.document"]
+        langs = index.get_active_languages()
+
+        documents_to_update = IndexDocument.browse()
+
+        for record in records:
+            for lang in langs:
+                # Find the index.document record
+                doc_record = IndexDocument.search(
+                    [
+                        ("index_id", "=", index.id),
+                        ("res_model", "=", record._name),
+                        ("res_id", "=", record.id),
+                        ("lang_id", "=", lang.id),
+                    ],
+                    limit=1,
+                )
+
+                if not doc_record:
+                    continue
+
+                # Prepare document in language context
+                record_in_lang = record.with_context(lang=lang.code)
+                document = record_in_lang._prepare_index_document()
+
+                # Add language and meilisearch_id to document
+                document["id"] = doc_record.meilisearch_id  # e.g., "42_en_US"
+                document["source_id"] = record.id
+                document["lang"] = lang.code
+
+                # Compute hash
+                document_hash = sha256(
+                    json.dumps(document, sort_keys=True).encode()
+                ).hexdigest()
+
+                # Check if update needed
+                if (
+                    document_hash != doc_record.index_document_hash
+                    or doc_record.index_result != "indexed"
+                ):
+                    doc_record.write(
+                        {
+                            "index_document": document,
+                            "index_document_hash": document_hash,
+                        }
+                    )
+                    documents_to_update |= doc_record
+
+        # Batch update to Meilisearch
+        if documents_to_update:
+            documents_to_update._update_to_meilisearch(index)
+
+    def _cleanup_index_documents(self, index, records):
+        """Remove index.document records for records that no longer pass filter."""
+        IndexDocument = self.env["meilisearch.index.document"]
+
+        docs_to_delete = IndexDocument.search(
+            [
+                ("index_id", "=", index.id),
+                ("res_model", "=", records[:1]._name),
+                ("res_id", "in", records.ids),
+            ]
+        )
+
+        if docs_to_delete:
+            docs_to_delete._delete_from_meilisearch(index)
+            docs_to_delete.unlink()
+
+    @api.depends("meilisearch_document_ids.index_result")
+    def _compute_meilisearch_status(self):
+        """Compute overall indexing status across all languages."""
         for record in self:
-            record.index_document_read = json.dumps(record.index_document, indent=4)
-
-    # Helper methods
-
-    def _convert_to_timestamp(self, dt, tz=pytz.UTC):
-        if not dt:
-            return 0
-        if isinstance(dt, datetime.date) and not isinstance(dt, datetime.datetime):
-            dt = datetime.datetime.combine(dt, datetime.datetime.min.time())
-        if tz:
-            dt = dt.astimezone(tz)
-        return int(dt.timestamp())
+            docs = record.meilisearch_document_ids
+            if not docs:
+                record.meilisearch_status = "not_configured"
+            elif any(d.index_result == "error" for d in docs):
+                record.meilisearch_status = "error"
+            elif all(d.index_result == "indexed" for d in docs):
+                record.meilisearch_status = "indexed"
+            elif any(d.index_result == "indexed" for d in docs):
+                record.meilisearch_status = "partial"
+            else:
+                record.meilisearch_status = "pending"
 
     # Model methods
 
     def check_index_document(self):
-        return self._get_documents()
+        """Check if documents exist in Meilisearch."""
+        for record in self:
+            record.meilisearch_document_ids._check_in_meilisearch()
+        return True
 
     def update_index_document(self):
+        """Force recomputation of index documents."""
         return self._compute_index_document()
 
     def delete_index_document(self):
-        return self._delete_documents()
+        """Delete documents from Meilisearch."""
+        for record in self:
+            if record.meilisearch_document_ids:
+                record.meilisearch_document_ids._delete_from_meilisearch()
+                record.meilisearch_document_ids.unlink()
+        return True
 
     def unlink(self):
-        self._delete_documents()
+        """Delete from Meilisearch before unlinking source record."""
+        for record in self:
+            if record.meilisearch_document_ids:
+                record.meilisearch_document_ids._delete_from_meilisearch()
+                record.meilisearch_document_ids.unlink()
         return super().unlink()
 
     # Action methods
@@ -110,117 +193,36 @@ class MeilsearchDocumentMixin(models.AbstractModel):
             },
         }
 
+    def button_view_index_documents(self):
+        """Open index documents related to this record."""
+        self.ensure_one()
+        return {
+            "name": f"Index Documents for {self.display_name}",
+            "type": "ir.actions.act_window",
+            "view_mode": "tree,form",
+            "res_model": "meilisearch.index.document",
+            "domain": [
+                ("res_model", "=", self._name),
+                ("res_id", "=", self.id),
+            ],
+            "context": {
+                "create": False,
+            },
+        }
+
     # Private methods
 
     def _prepare_index_document(self):
+        """
+        Prepare the document for indexing.
+        Called in language context - self already has lang in context.
+        Override in subclasses to add model-specific fields.
+
+        Note: "id", "source_id", and "lang" are added by _sync_index_documents
+        """
         self.ensure_one()
-        return {"id": self.id, "name": self.name}
+        return {"name": self.name}
 
     def _get_index_document_filter(self):
+        """Return a filter function to determine which records should be indexed."""
         return lambda r: True
-
-    def _update_documents(self, index):
-        client = index.get_client()
-        for offset in range(0, len(self), 20):
-            batch = self[offset : offset + 20]
-            if client:
-                try:
-                    with self.env.cr.savepoint():
-                        res = client.index(index.index_name).update_documents([self.index_document for self in batch])
-                        if index.create_task:
-                            self.env["meilisearch.task"].create(
-                                {
-                                    "name": "documentAdditionOrUpdate",
-                                    "index_id": index.id,
-                                    "uid": res.task_uid,
-                                    "document_ids": [rec.id for rec in batch],
-                                }
-                            )
-                        batch.update(
-                            {
-                                "index_result": "queued",
-                                "index_response": "Task enqueued",
-                                "index_date": res.enqueued_at,
-                            }
-                        )
-                except Exception as e:
-                    batch.write({"index_result": "error", "index_response": e})
-            else:
-                batch.write({"index_result": "no_index", "index_response": "Index not found"})
-
-    def _get_documents(self):
-        index = self.env["meilisearch.index"].get_matching_index(model=self[:0]._name)
-        client = index.get_client()
-
-        # Batch size has to match the max operators in the filter
-        for offset in range(0, len(self), 20):
-            batch = self[offset : offset + 20]
-            if client:
-                try:
-                    with self.env.cr.savepoint():
-                        search_filter = f"{' OR '.join(['id='+str(rec.id) for rec in batch])}"
-                        res = client.index(index.index_name).search("", {"filter": search_filter})
-                        if res["hits"]:
-                            found_ids = []
-                            for document in res["hits"]:
-                                rec = self.browse(int(document["id"]))
-                                rec.write(
-                                    {
-                                        "index_result": "indexed",
-                                        "index_response": json.dumps(document, indent=4),
-                                    }
-                                )
-                                found_ids.append(rec.id)
-
-                            # Update records not in hits set
-                            not_found = batch.filtered(lambda r: r.id not in found_ids)
-                            not_found.write(
-                                {
-                                    "index_result": "not_found",
-                                    "index_response": "Document not found",
-                                }
-                            )
-                        else:
-                            batch.update(
-                                {
-                                    "index_result": "not_found",
-                                    "index_response": res,
-                                }
-                            )
-                except Exception as e:
-                    batch.write({"index_result": "error", "index_response": e})
-            else:
-                batch.write({"index_result": "no_index", "index_response": "Index not found"})
-
-    def _delete_documents(self):
-        index = self.env["meilisearch.index"].get_matching_index(model=self[:0]._name)
-        client = index.get_client()
-
-        for offset in range(0, len(self), 20):
-            batch = self[offset : offset + 20]
-            if client:
-                try:
-                    with self.env.cr.savepoint():
-                        search_filter = f"{' OR '.join(['id='+str(rec.id) for rec in batch])}"
-                        res = client.index(index.index_name).delete_documents(filter=search_filter)
-                        if index.create_task:
-                            self.env["meilisearch.task"].create(
-                                {
-                                    "name": "documentDeletion",
-                                    "index_id": index.id,
-                                    "uid": res.task_uid,
-                                    "document_ids": [rec.id for rec in batch],
-                                }
-                            )
-                        batch.update(
-                            {
-                                "index_result": "queued",
-                                "index_response": "Task enqueued",
-                                "index_date": res.enqueued_at,
-                                "index_document_hash": "",
-                            }
-                        )
-                except Exception as e:
-                    batch.write({"index_result": "error", "index_response": e})
-            else:
-                batch.write({"index_result": "no_index", "index_response": "Index not found"})

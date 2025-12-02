@@ -1,4 +1,4 @@
-from odoo import api, models
+from odoo import api, models, fields
 
 
 class ProductTemplate(models.Model):
@@ -7,8 +7,9 @@ class ProductTemplate(models.Model):
 
     def _prepare_index_document(self):
         document = super()._prepare_index_document()
-        document["category_name"] = self.categ_id.name
-        document["category_full_name"] = self.categ_id.display_name
+        categ_id = fields.first(self.public_categ_ids)
+        document["category_name"] = categ_id.name
+        document["category_full_name"] = categ_id.display_name
         document["sales_count"] = self.variant_sale_qty360days
 
         if self.default_code and self.default_code != "/":
@@ -29,7 +30,12 @@ class ProductTemplate(models.Model):
         return document
 
     def _get_index_document_filter(self):
-        return lambda r: r.is_published and r.sale_ok and r.categ_id.is_published
+        return (
+            lambda r: r.active
+            and r.is_published
+            and r.sale_ok
+            and r.categ_id.is_published
+        )
 
     @api.depends(
         "name",
@@ -44,4 +50,3 @@ class ProductTemplate(models.Model):
     )
     def _compute_index_document(self):
         return super()._compute_index_document()
-

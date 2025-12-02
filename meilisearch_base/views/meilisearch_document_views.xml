@@ -1,23 +1,20 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <odoo>
 
+    <!-- Views for meilisearch.document.mixin (abstract, used by product.template, etc.) -->
+
     <record id="document_view_search" model="ir.ui.view">
         <field name="name">meilisearch_base.document_view_search</field>
         <field name="model">meilisearch.document.mixin</field>
         <field name="arch" type="xml">
             <search>
                 <field name="name" />
-                <field name="index_result" />
-                <field
-                    name="index_response"
-                    filter_domain="[('index_response','ilike',self)]"
-                />
-                <filter name="index_date" date="index_date" />
+                <field name="meilisearch_status" />
                 <group expand="0" string="Group By...">
                     <filter
-                        name="group_by_index_result"
-                        string="Index Result"
-                        context="{'group_by':'index_result'}"
+                        name="group_by_meilisearch_status"
+                        string="Meilisearch Status"
+                        context="{'group_by':'meilisearch_status'}"
                     />
                 </group>
             </search>
@@ -48,8 +45,7 @@
                     />
                 </header>
                 <field name="name" />
-                <field name="index_result" />
-                <field name="index_date" />
+                <field name="meilisearch_status" />
             </tree>
         </field>
     </record>
@@ -85,6 +81,12 @@
                             string="Open Document"
                             icon="fa-file"
                         />
+                        <button
+                            name="button_view_index_documents"
+                            type="object"
+                            string="Index Documents"
+                            icon="fa-search"
+                        />
                     </div>
                     <div class="oe_title">
                         <h1>
@@ -93,23 +95,185 @@
                     </div>
                     <group>
                         <group>
-                            <field
-                                name="index_document_read"
-                                class="code-json"
-                                nolabel="1"
-                                colspan="2"
-                            />
-                            <field name="index_document_hash" />
-                        </group>
-                        <group>
-                            <field name="index_result" />
-                            <field name="index_date" />
-                            <field name="index_response" />
+                            <field name="meilisearch_status" />
                         </group>
                     </group>
+                    <notebook>
+                        <page string="Index Documents">
+                            <field name="meilisearch_document_ids" readonly="1">
+                                <tree>
+                                    <field name="lang_id" />
+                                    <field name="meilisearch_id" />
+                                    <field name="index_result" />
+                                    <field name="index_date" />
+                                </tree>
+                            </field>
+                        </page>
+                    </notebook>
                 </sheet>
             </form>
         </field>
     </record>
+
+    <!-- Views for meilisearch.index.document (new model) -->
+
+    <record id="index_document_view_search" model="ir.ui.view">
+        <field name="name">meilisearch.index.document.search</field>
+        <field name="model">meilisearch.index.document</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="display_name" />
+                <field name="meilisearch_id" />
+                <field name="res_model" />
+                <field name="lang_id" />
+                <field name="index_result" />
+                <filter
+                    name="filter_pending"
+                    string="Pending"
+                    domain="[('index_result', '=', 'pending')]"
+                />
+                <filter
+                    name="filter_queued"
+                    string="Queued"
+                    domain="[('index_result', '=', 'queued')]"
+                />
+                <filter
+                    name="filter_indexed"
+                    string="Indexed"
+                    domain="[('index_result', '=', 'indexed')]"
+                />
+                <filter
+                    name="filter_error"
+                    string="Error"
+                    domain="[('index_result', '=', 'error')]"
+                />
+                <separator />
+                <group expand="0" string="Group By...">
+                    <filter
+                        name="group_by_index_result"
+                        string="Index Result"
+                        context="{'group_by':'index_result'}"
+                    />
+                    <filter
+                        name="group_by_lang"
+                        string="Language"
+                        context="{'group_by':'lang_id'}"
+                    />
+                    <filter
+                        name="group_by_index"
+                        string="Index"
+                        context="{'group_by':'index_id'}"
+                    />
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="index_document_view_tree" model="ir.ui.view">
+        <field name="name">meilisearch.index.document.tree</field>
+        <field name="model">meilisearch.index.document</field>
+        <field name="arch" type="xml">
+            <tree>
+                <header>
+                    <button
+                        name="action_check"
+                        string="Check in Meilisearch"
+                        type="object"
+                        class="oe_highlight"
+                    />
+                    <button
+                        name="action_reindex"
+                        string="Reindex"
+                        type="object"
+                    />
+                </header>
+                <field name="meilisearch_id" />
+                <field name="res_model" optional="hide" />
+                <field name="res_id" />
+                <field name="lang_id" />
+                <field name="index_id" optional="hide" />
+                <field name="index_result" />
+                <field name="index_date" />
+            </tree>
+        </field>
+    </record>
+
+    <record id="index_document_view_form" model="ir.ui.view">
+        <field name="name">meilisearch.index.document.form</field>
+        <field name="model">meilisearch.index.document</field>
+        <field name="arch" type="xml">
+            <form>
+                <header>
+                    <button
+                        name="action_check"
+                        string="Check in Meilisearch"
+                        type="object"
+                        class="btn-primary"
+                    />
+                    <button
+                        name="action_reindex"
+                        string="Reindex"
+                        type="object"
+                    />
+                    <field name="index_result" widget="statusbar" />
+                </header>
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button
+                            name="button_view_source"
+                            type="object"
+                            string="Open Source Record"
+                            icon="fa-external-link"
+                        />
+                    </div>
+                    <div class="oe_title">
+                        <h1>
+                            <field name="meilisearch_id" />
+                        </h1>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="index_id" />
+                            <field name="res_model" />
+                            <field name="res_id" />
+                            <field name="lang_id" />
+                        </group>
+                        <group>
+                            <field name="index_date" />
+                            <field name="index_document_hash" />
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Document">
+                            <field
+                                name="index_document_read"
+                                widget="ace"
+                                options="{'mode': 'json'}"
+                                nolabel="1"
+                            />
+                        </page>
+                        <page string="Response">
+                            <field name="index_response" nolabel="1" />
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_index_document_view" model="ir.actions.act_window">
+        <field name="name">Index Documents</field>
+        <field name="res_model">meilisearch.index.document</field>
+        <field name="view_mode">tree,form</field>
+        <field name="context">{'search_default_group_by_index_result': 1}</field>
+    </record>
+
+    <menuitem
+        id="menu_meilisearch_index_document"
+        name="Index Documents"
+        parent="meilisearch_base.menu_root"
+        sequence="20"
+        action="action_index_document_view"
+    />
 
 </odoo>

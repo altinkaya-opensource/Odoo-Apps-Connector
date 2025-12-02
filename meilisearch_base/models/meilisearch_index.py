@@ -30,7 +30,12 @@ class MeilisearchIndex(models.Model):
         required=True,
         default="""{
     "filterableAttributes": [
-        "id"
+        "id",
+        "source_id",
+        "lang"
+    ],
+    "sortableAttributes": [
+        "source_id"
     ]
 }""",
     )
@@ -39,7 +44,18 @@ class MeilisearchIndex(models.Model):
         default=True,
         help="Create tasks to track document addition and update.",
     )
+    lang_ids = fields.Many2many(
+        "res.lang",
+        string="Languages",
+        help="Languages to index. If empty, only the default language is used.",
+        domain=[("active", "=", True)],
+    )
     task_ids = fields.One2many("meilisearch.task", "index_id")
+    document_ids = fields.One2many(
+        "meilisearch.index.document",
+        "index_id",
+        string="Index Documents",
+    )
     task_count = fields.Integer(compute="_compute_task_count", store=True)
 
     document_filtered_count = fields.Integer(string="Documents Filtered", compute="_compute_document_count", store=True)
@@ -64,11 +80,17 @@ class MeilisearchIndex(models.Model):
             index.meilisearch_index_url = url
 
     def _compute_document_count(self):
+        IndexDocument = self.env["meilisearch.index.document"]
         for index in self:
             if index.active and index.model in self.env:
-                model = self.env[index.model]
-                groups = model.read_group([], ["index_result"], ["index_result"])
-                index.document_filtered_count = model.search_count([])
+                groups = IndexDocument.read_group(
+                    [("index_id", "=", index.id)],
+                    ["index_result"],
+                    ["index_result"],
+                )
+                index.document_filtered_count = IndexDocument.search_count(
+                    [("index_id", "=", index.id)]
+                )
 
                 def get_status_count(status):
                     matching = [g for g in groups if g["index_result"] == status]
@@ -162,23 +184,125 @@ class MeilisearchIndex(models.Model):
         )
         return index
 
-    def button_view_documents(self):
-        tree_view_id = self.env.ref("meilisearch_base.document_view_tree")
-        form_view_id = self.env.ref("meilisearch_base.document_view_form")
-        search_view_id = self.env.ref("meilisearch_base.document_view_search")
+    def get_active_languages(self):
+        """Return languages to index. Falls back to default language."""
+        self.ensure_one()
+        if self.lang_ids:
+            return self.lang_ids
+        # Fallback to default language
+        default_lang = self.env["res.lang"].search([("code", "=", "en_US")], limit=1)
+        return default_lang or self.env["res.lang"].search(
+            [("active", "=", True)], limit=1
+        )
+
+    def _ensure_index_documents(self, records):
+        """
+        Ensure meilisearch.index.document records exist for all
+        (record, language) combinations.
+        """
+        IndexDocument = self.env["meilisearch.index.document"]
+        langs = self.get_active_languages()
+
+        for record in records:
+            for lang in langs:
+                existing = IndexDocument.search(
+                    [
+                        ("index_id", "=", self.id),
+                        ("res_model", "=", record._name),
+                        ("res_id", "=", record.id),
+                        ("lang_id", "=", lang.id),
+                    ],
+                    limit=1,
+                )
+
+                if not existing:
+                    IndexDocument.create(
+                        {
+                            "index_id": self.id,
+                            "res_model": record._name,
+                            "res_id": record.id,
+                            "lang_id": lang.id,
+                        }
+                    )
+
+    def _remove_obsolete_documents(self, records, valid_lang_ids=None):
+        """
+        Remove index.document records for languages no longer configured
+        or for records that no longer pass the filter.
+        """
+        IndexDocument = self.env["meilisearch.index.document"]
+
+        domain = [
+            ("index_id", "=", self.id),
+            ("res_model", "=", records[:1]._name),
+            ("res_id", "in", records.ids),
+        ]
+
+        if valid_lang_ids is not None:
+            domain.append(("lang_id", "not in", valid_lang_ids.ids))
+
+        obsolete = IndexDocument.search(domain)
+        if obsolete:
+            obsolete._delete_from_meilisearch()
+            obsolete.unlink()
+
+    def button_sync_languages(self):
+        """
+        Sync index.document records with current language configuration.
+        Creates missing documents and removes obsolete ones.
+        """
+        self.ensure_one()
+        if not self.model or self.model not in self.env:
+            return
+
+        model = self.env[self.model]
+        all_records = model.search([])
+
+        if not all_records:
+            return
+
+        # Get filter to identify indexable records
+        filter_func = all_records._get_index_document_filter()
+        indexable_records = all_records.filtered(filter_func)
+        non_indexable = all_records - indexable_records
+
+        # Ensure documents exist for indexable records
+        if indexable_records:
+            self._ensure_index_documents(indexable_records)
+
+        # Remove documents for non-indexable records
+        if non_indexable:
+            self._remove_obsolete_documents(non_indexable)
+
+        # Remove documents for languages no longer configured
+        if indexable_records:
+            self._remove_obsolete_documents(
+                indexable_records, valid_lang_ids=self.get_active_languages()
+            )
+
         return {
-            "name": "Index Documents",
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("Languages Synced"),
+                "message": _("Index documents have been synchronized with language configuration."),
+                "sticky": False,
+                "type": "success",
+            },
+        }
+
+    def button_view_documents(self):
+        return {
+            "name": _("Index Documents"),
             "type": "ir.actions.act_window",
             "view_mode": "tree,form",
-            "views": [(tree_view_id.id, "tree"), (form_view_id.id, "form")],
-            "res_model": self.model,
+            "res_model": "meilisearch.index.document",
+            "domain": [("index_id", "=", self.id)],
             "context": {
                 "search_default_group_by_index_result": True,
+                "default_index_id": self.id,
                 "create": False,
-                "delete": False,
-                "edit": False,
             },
-            "search_view_id": [search_view_id.id, "search"],
         }
 
     def button_view_tasks(self):
@@ -225,14 +349,16 @@ class MeilisearchIndex(models.Model):
         Check all documents in index that are not indexed.
         """
         self.ensure_one()
-        model = self.env[self.model]
+        IndexDocument = self.env["meilisearch.index.document"]
 
-        # Get records that are not indexed
-        records = model.search([("index_result", "!=", "indexed")])
-        records_count = len(records)
-        for offset in range(0, records_count, 20):
-            batch = records[offset : offset + 20]
-            batch._get_documents()
+        # Get index documents that are not indexed
+        documents = IndexDocument.search(
+            [
+                ("index_id", "=", self.id),
+                ("index_result", "!=", "indexed"),
+            ]
+        )
+        documents._check_in_meilisearch(self)
         self._compute_document_count()
 
     def check_all_tasks(self):

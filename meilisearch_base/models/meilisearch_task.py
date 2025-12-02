@@ -40,32 +40,26 @@ class MeilisearchTask(models.Model):
         return res
 
     def _get_document_ids(self):
+        """Get meilisearch.index.document records associated with this task."""
         self.ensure_one()
-        document_ids = self.env[self.index_id.model].browse(safe_eval(self.document_ids))
-        return document_ids
+        doc_ids = safe_eval(self.document_ids)
+        return self.env["meilisearch.index.document"].browse(doc_ids)
 
     def button_check_task(self):
         self.ensure_one()
         self.check_task()
 
     def button_view_documents(self):
-        tree_view_id = self.env.ref("meilisearch_base.document_view_tree")
-        form_view_id = self.env.ref("meilisearch_base.document_view_form")
-        search_view_id = self.env.ref("meilisearch_base.document_view_search")
+        doc_ids = safe_eval(self.document_ids)
         return {
-            "name": "Index Documents",
+            "name": _("Index Documents"),
             "type": "ir.actions.act_window",
             "view_mode": "tree,form",
-            "views": [(tree_view_id.id, "tree"), (form_view_id.id, "form")],
-            "res_model": self.index_id.model,
+            "res_model": "meilisearch.index.document",
+            "domain": [("id", "in", doc_ids)],
             "context": {
-                "search_default_group_by_index_result": True,
                 "create": False,
-                "delete": False,
-                "edit": False,
             },
-            "search_view_id": [search_view_id.id, "search"],
-            "domain": [("id", "in", safe_eval(self.document_ids))],
         }
 
     def task_succeeded(self):

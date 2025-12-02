@@ -82,6 +82,12 @@
                         string="Check All Tasks"
                         type="object"
                     />
+                    <button
+                        name="button_sync_languages"
+                        string="Sync Languages"
+                        type="object"
+                        groups="meilisearch_base.group_manager"
+                    />
                 </header>
                 <sheet>
                     <div class="oe_button_box" name="button_box">
@@ -115,6 +121,10 @@
                             <field name="index_name" />
                             <field name="database_filter" />
                             <field name="model_id" />
+                            <field
+                                name="lang_ids"
+                                widget="many2many_tags"
+                            />
                             <field
                                 name="index_settings"
                                 groups="meilisearch_base.group_manager"
